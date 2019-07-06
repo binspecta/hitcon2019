@@ -1,0 +1,23 @@
+<html>
+  <head>
+  </head>
+  <body onload="leak()">
+    <script>
+
+	  function leak(){
+		  var R = new RegExp( "(((A)bc\\3[^]{1,10000}))" );	
+		  let source = 'AbcA';
+		  
+		  var ret = ''
+		  source.replace(R, (match) => {
+			  ret = match;
+		  });
+
+		  document.write(ret);
+	  }
+
+	</script>
+  </body>
+</html>
+
+
